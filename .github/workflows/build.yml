@@ -1,0 +1,134 @@
+#=================================================
+# Description: Build OpenWrt using GitHub Actions
+# Lisence: MIT
+# Author: Mod from P3TERX
+#=================================================
+
+name: OpenWrt
+
+on:
+  push:
+    branches:
+      - master
+  # schedule:
+  # - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      SSH_ACTIONS:
+        description: 'Needs to create a ssh debug session?'
+        required: false
+        default: 'false'
+
+env:
+  TZ: Asia/Shanghai
+  TMATE_ENCRYPT_PASSWORD: ${{secrets.TMATE_ENCRYPT_PASSWORD}}
+
+jobs:
+    build:
+      runs-on: ubuntu-latest
+      # if: github.event.repository.owner.id == github.event.sender.id
+
+      steps:
+      - name: Checkout
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 1
+
+      - name: Set Username
+        id: set_name
+        run: |
+          echo "##[set-output name=username;]4nsw3r"
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E sysctl vm.swappiness=0
+          nohup sudo -E rm -rf /usr/share/dotnet /usr/local/lib/android/sdk &
+          sudo -E apt-get update
+          sudo -E apt-get -y --no-install-recommends install antlr3 asciidoc autoconf automake autopoint binutils build-essential bzip2 ccache curl device-tree-compiler flex g++-multilib gawk gcc-multilib gettext git git-core gperf haveged intltool jq lib32gcc1 libc6-dev-i386 libelf-dev libglib2.0-dev libncurses5-dev libreadline-dev libssl-dev libtool libz-dev lrzsz msmtp nano p7zip p7zip-full patch python-is-python2 python-ply python3 python3-pip python3-ply qemu-utils rsync scons subversion swig texinfo uglifyjs unzip upx vim wget xmlto zlib1g-dev
+          git config --global user.name "Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Clone Source
+        run: |
+          git clone -b openwrt-21.02 --single-branch --depth=1 https://github.com/immortalwrt/immortalwrt openwrt
+          sudo -E chown -R runner:runner openwrt
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Load Config
+        run: |
+          cd openwrt
+          mv ../.config .config
+
+      - name: Additional Step
+        run: |
+          bash addon_steps.sh
+
+      - name: Set Build Time
+        id: set_time
+        run: |
+          build_time=$(date +%Y-%m-%dT%H-%M)
+          echo -e "\033[32m\033[1m$build_time\033[0m"
+          echo "##[set-output name=build_time;]$build_time"
+
+      - name: Setup Debug Session
+        if: github.event.inputs.SSH_ACTIONS == 'true'
+        uses: tete1030/safe-debugger-action@dev
+
+      - name: Make
+        run: |
+          cd openwrt
+          make defconfig
+          make -j$[$(nproc)+1]
+
+      - name: Rebuild to Collect Error Log
+        if: failure()
+        run: |
+          cd openwrt
+          make -j1 V=s
+
+      - name: Organize Files
+        run: |
+          rm -rf artifact
+          mkdir artifact
+          cd openwrt
+          cp .config ../artifact/config.seed
+          ./scripts/diffconfig.sh > ../artifact/config.slim.seed
+          cd ../artifact/
+          rm ../openwrt/bin/targets/x86/64/*rootfs*.img
+          mv -f ../openwrt/bin/targets/x86/64/*.img .
+          echo "Author: ${{ steps.set_name.outputs.username }}" > checksums
+          echo "Date:   ${{ steps.set_time.outputs.build_time }}" >> checksums
+          echo -e "MD5:    \c" >> checksums
+          md5sum *.img | grep squashfs | cut -d " " -f 1 >> checksums
+          echo -e "SHA256: \c" >> checksums
+          sha256sum *.img | grep squashfs | cut -d " " -f 1 >> checksums
+          cp checksums ../body.md
+          zip -z ../OpenWrt-${{ steps.set_name.outputs.username }}-${{ steps.set_time.outputs.build_time }}-ROM.zip * < checksums
+          cd ..
+          sed -i 's/:\ \+/:\t/g' body.md
+
+      - name: Upload ROM Artifact
+        uses: actions/upload-artifact@main
+        with:
+          name: OpenWrt-${{ steps.set_name.outputs.username }}-${{ steps.set_time.outputs.build_time }}-ROM
+          path: ./artifact/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            OpenWrt-${{ steps.set_name.outputs.username }}-${{ steps.set_time.outputs.build_time }}-ROM.zip
+            artifact/config.seed
+          body_path: "body.md"
+          target_commitish: ${{ github.sha }}
+          name: OpenWrt-${{ steps.set_name.outputs.username }}-${{ steps.set_time.outputs.build_time }}
+          tag_name: ${{ steps.set_time.outputs.build_time }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Debug Session
+        if: failure()
+        uses: tete1030/safe-debugger-action@dev
